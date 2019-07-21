@@ -1,0 +1,356 @@
+#!/usr/bin/php
+<?php
+
+$siteControl = new SiteControl($argv);
+
+class SiteControl
+{
+    /**
+     * Only local using!!!
+     *
+     * Settings:
+     * 1. Create folder /etc/apache2/vhosts (for site configs)
+     * 2. Set owner to folder /etc/apache2/vhosts -> execute command 'sudo chown iextra:wheel /etc/apache2/vhosts'
+     * 3. Add to apache config (httpd.conf) -> 'IncludeOptional /etc/apache2/vhosts/*.conf'
+     * 4. Set owner to file hosts /etc/hosts -> execute command 'sudo chown iextra:wheel /etc/hosts'
+     *
+     * Extra setting (for quick access to command 'site' from console):
+     * 1. Move file 'site' to folder '/usr/local/bin'
+     * 2. Execute command 'sudo chmod +x /usr/local/bin/site'
+     */
+
+    private $action = null;
+    private $hostName = null;
+    private $errors = [];
+    private $arAvailableActions = ['add', '-a', 'delete', '-d'];
+
+    private $hostIp = '127.0.0.1';
+    private $hostsFile = '/etc/hosts';
+    private $sitesDirPath = '/Users/iextra/Sites/';
+    private $apacheConfigsDir = '/etc/apache2/vhosts/';
+    private $apacheErrorDir = '/Users/iextra/Sites/logs/apache2/';
+
+    function __construct($args)
+    {
+        $this->getArgs($args);
+
+        $this->checkAction();
+        $this->checkSitesDir();
+        $this->checkHostsFile();
+        $this->checkApacheConfigDir();
+
+        if (empty($this->errors)) {
+            $this->doAction();
+        } else {
+            $this->showErrors();
+        }
+    }
+
+    public function doAction()
+    {
+        switch ($this->action) {
+            case 'add':
+            case '-a':
+                $this->siteAdd($this->hostName);
+                break;
+            case 'delete':
+            case '-d':
+                $this->siteDelete($this->hostName);
+                break;
+
+            default:
+                $this->showError('Error: Action ' . $this->action . ' does not exist!');
+                break;
+        }
+    }
+
+    private function showMessage($message)
+    {
+        echo $message . "\r\n";
+    }
+
+    private function showErrors()
+    {
+        if (!empty($this->errors)) {
+            foreach ($this->errors as $error) {
+                $this->showMessage($error);
+            }
+        }
+    }
+
+    private function showError($error)
+    {
+        $this->showMessage($error);
+        exit();
+    }
+
+    private function addError($error)
+    {
+        $this->errors[] = $error;
+    }
+
+    private function siteAdd($host = null)
+    {
+        if (!empty($host)) {
+            $hostName = $host;
+        } else {
+            $hostName = $this->showDialog('Enter hostname');
+        }
+
+        if (empty($hostName)) {
+            $this->showError('Error: Hostname cannot be empty!');
+        }
+
+        if (!$this->addSiteDir($hostName)) {
+            $this->siteAdd(null);
+        }
+
+        $this->addHost($hostName);
+        $this->addApacheConfig($hostName);
+
+        if (empty($this->errors)) {
+            $this->apacheRestart();
+            $this->showMessage('Success: Host ' . $hostName . ' created.');
+        } else {
+            $this->showErrors();
+        }
+    }
+
+    private function addSiteDir($dirName)
+    {
+        $path = $this->sitesDirPath . $dirName;
+
+        if (is_dir($path)) {
+            $this->showMessage('Warning: Folder \'' . $dirName . '\' already exists');
+            $result = false;
+        } else {
+            if (mkdir($path) === false) {
+                $this->showError('Error: Failed to create folder \'' . $dirName . '\' !');
+                $result = false;
+            } else {
+                $result = true;
+            }
+        }
+
+        return $result;
+    }
+
+    private function siteDelete($host = null)
+    {
+        $sitesDir = scandir($this->sitesDirPath);
+        $arHosts = [];
+
+        foreach ($sitesDir as $key => $dirName) {
+            if ($dirName === '.'
+                || $dirName === '..'
+                || $dirName[0] === '.'
+                || !is_dir($this->sitesDirPath . $dirName)) {
+                continue;
+            }
+
+            $arHosts[$key] = $dirName;
+            if (empty($host)) {
+                echo $key . '. ' . $dirName . "\r\n";
+            }
+        }
+
+        if (!empty($arHosts)) {
+
+            if (!empty($host)) {
+                $hostName = $host;
+            } else {
+                $hostName = $this->showDialog('Enter the hostname to remove');
+            }
+
+            if (!empty($hostName)) {
+                if (in_array($hostName, $arHosts)) {
+                    $dir = $this->sitesDirPath . $hostName;
+
+                    $this->removeDir($dir);
+                    $this->removeApacheConfig($hostName);
+                    $this->removeHost($hostName);
+
+                    if (empty($this->errors)) {
+                        $this->apacheRestart();
+                        $this->showMessage('Success: Host ' . $hostName . ' deleted.');
+                    } else {
+                        $this->showErrors();
+                    }
+                } else {
+                    $this->showError('Error: Incorrect host name!');
+                }
+            }
+        } else {
+            $this->showError('Warning: Dir with sites is empty');
+        }
+    }
+
+    private function removeDir($dir)
+    {
+        exec('rm -rf ' . escapeshellarg($dir));
+    }
+
+    private function removeApacheConfig($hostName)
+    {
+        $file = $this->apacheConfigsDir . $hostName . '.conf';
+
+        if (file_exists($file)) {
+            if (!unlink($file)) {
+                $this->addError("Error: Error of delete apache config '{$hostName}'.conf");
+            }
+        }
+    }
+
+    private function removeHost($hostName)
+    {
+        $deleteKey = null;
+
+        if (is_writable($this->hostsFile)) {
+            $arStr = file($this->hostsFile);
+
+            foreach ($arStr as $key => $str) {
+                if (str_replace("\r\n", '', $str) === $this->hostIp . ' ' . $hostName) {
+                    $deleteKey = $key;
+                    break;
+                }
+            }
+
+            if (!empty($deleteKey)) {
+                unset($arStr[$deleteKey]);
+
+                end($arStr);
+                $lastKey = key($arStr);
+                reset($arStr);
+
+                $arStr[$lastKey] = str_replace("\r\n", '', $arStr[$lastKey]);
+            }
+
+            if (!empty($deleteKey)) {
+                if (file_put_contents($this->hostsFile, implode('', $arStr)) === false) {
+                    $this->addError('Error: Cannot edit to hosts file!');
+                }
+            }
+        } else {
+            $this->addError('Error: Hosts file not available for edit!');
+        }
+    }
+
+    private function addApacheConfig($hostName)
+    {
+        $file = $this->apacheConfigsDir . $hostName . '.conf';
+
+        if (file_exists($file)) {
+            $this->showMessage('Warning: Apache config \'' . $hostName . '\' already exists');
+        } else {
+            $data = $this->apacheConfig($hostName);
+            if (file_put_contents($file, $data) === false) {
+                $this->addError('Error: Cannot write to apache config');
+            }
+        }
+    }
+
+    private function apacheConfig($hostName)
+    {
+        $sitePath = $this->sitesDirPath . $hostName;
+        $apacheErrorDir = $this->apacheErrorDir . $hostName . '-error_log';
+
+        return '<VirtualHost *:80>
+				    ServerAdmin webmaster@' . $hostName . '
+				    DocumentRoot "' . $sitePath . '"
+				    ServerName ' . $hostName . '
+				    ServerAlias www.' . $hostName . '
+				    ErrorLog "' . $apacheErrorDir . '"
+				    <Directory "' . $sitePath . '">
+				          Options Indexes FollowSymLinks
+				          AllowOverride All
+				          Order allow,deny
+				          Allow from all
+				    </Directory>
+				</VirtualHost>';
+    }
+
+    private function addHost($alias)
+    {
+        if (is_writable($this->hostsFile)) {
+
+            $hostStr = "\r\n" . $this->hostIp . ' ' . $alias;
+            if (file_put_contents($this->hostsFile, $hostStr, FILE_APPEND) === false) {
+                $this->addError('Error: Cannot edit to hosts file!');
+            }
+        } else {
+            $this->addError('Error: Hosts file not available for write!');
+        }
+    }
+
+    private function showDialog($message)
+    {
+        echo $message . ': ';
+        $result = trim(fgets(STDIN));
+
+        if (!empty($result)) {
+            return $result;
+        }
+        return false;
+    }
+
+    private function getAction($args)
+    {
+        if (!empty($args[1])) {
+            return strtolower($args[1]);
+        } else {
+            $this->addError('Enter command: [' . implode('|', $this->arAvailableActions) . ']');
+        }
+
+        exit();
+    }
+
+    private function getArgs($args)
+    {
+        $this->action = $this->getAction($args);
+
+        if (!empty($args[2])) {
+            $this->hostName = $args[2];
+        }
+    }
+
+    private function checkAction()
+    {
+        if (!in_array($this->action, $this->arAvailableActions)) {
+            $this->addError('Available commands: [' . implode('|', $this->arAvailableActions) . ']');
+        }
+    }
+
+    private function checkSitesDir()
+    {
+        if (empty($this->sitesDirPath)) {
+            $this->showError('Error: Path to the folder with sites is not specified!');
+        } else if (!is_dir($this->sitesDirPath)) {
+            $this->showError('Error: Incorrect path to the folder with sites (folder does not exist)!');
+        }
+    }
+
+    private function checkHostsFile()
+    {
+        if (empty($this->hostsFile)) {
+            $this->showError('Error: Path to the hosts file is not specified!');
+        } else if (!file_exists($this->hostsFile)) {
+            $this->showError('Error: Hosts file does not exist!');
+        } else if (!is_writable($this->hostsFile)) {
+            $this->showError('Error: Hosts file does not writable!');
+        }
+    }
+
+    private function checkApacheConfigDir()
+    {
+        if (empty($this->apacheConfigsDir)) {
+            $this->showError('Error: Path to the folder with apache configs is not specified!');
+        } else if (!is_dir($this->apacheConfigsDir)) {
+            $this->showError('Error: Incorrect path to the folder with apache configs (folder does not exist)!');
+        }
+    }
+
+    private function apacheRestart()
+    {
+        echo exec('sudo apachectl restart');
+    }
+}
